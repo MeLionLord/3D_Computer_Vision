@@ -17,6 +17,20 @@ def rgbd_to_pcd(color_frame, depth_frame):
     pcd_tmp.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
     return pcd_tmp
 
+def update_frame(frames):
+    aligned_frames = align.process(frames)
+    depth_frame = aligned_frames.first(rs.stream.depth)
+    color_frame = aligned_frames.get_color_frame()
+    
+    pcd_new = rgbd_to_pcd(color_frame, depth_frame)
+    pcd.points = pcd_new.points
+    pcd.colors = pcd_new.colors
+
+    vis.update_geometry(pcd)
+    vis.poll_events()
+    vis.update_renderer()
+
+
 bag_filename = 'mandarinka_record.bag'
 FROM_BAG = True
 
@@ -55,32 +69,13 @@ if FROM_BAG:
         got_frame, frames = pipeline.try_wait_for_frames(1000)
         if not got_frame: break
 
-        aligned_frames = align.process(frames)
-        depth_frame = aligned_frames.first(rs.stream.depth)
-        color_frame = aligned_frames.get_color_frame()
-        
-        pcd_new = rgbd_to_pcd(color_frame, depth_frame)
-        pcd.points = pcd_new.points
-        pcd.colors = pcd_new.colors
-
-        vis.update_geometry(pcd)
-        vis.poll_events()
-        vis.update_renderer()
+        update_frame(frames)
         
 else:
     while not keyboard.is_pressed('Esc'):
         frames = pipeline.wait_for_frames()
-        aligned_frames = align.process(frames)
-        depth_frame = aligned_frames.first(rs.stream.depth)
-        color_frame = aligned_frames.get_color_frame()
         
-        pcd_new = rgbd_to_pcd(color_frame, depth_frame)
-        pcd.points = pcd_new.points
-        pcd.colors = pcd_new.colors
-
-        vis.update_geometry(pcd)
-        vis.poll_events()
-        vis.update_renderer()
+        update_frame(frames)
     
 vis.destroy_window()
 pipeline.stop()
