@@ -45,9 +45,10 @@ config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
 config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
 
 pipeline_profile = pipeline.start(config)
-# if FROM_BAG:
-#     playback = pipeline_profile.get_device().as_playback()
-#     playback.set_real_time(False)
+
+if FROM_BAG:
+    playback = pipeline_profile.get_device().as_playback()
+    playback.set_real_time(False)
 
 # First frame to build visualizer
 frames = pipeline.wait_for_frames()
@@ -56,26 +57,19 @@ color_frame = aligned_frames.first(rs.stream.color)
 depth_frame = aligned_frames.get_depth_frame()
 pcd = rgbd_to_pcd(color_frame, depth_frame)
 
-# Initialize Visualizer and start animation callback
+# Initialize Visualizer
 vis = o3d.visualization.Visualizer()
-vis.create_window(window_name='Stream', left=0, top=35)
+vis.create_window(window_name='Stream', width=1280, height=720)
 vis.add_geometry(pcd)
 
 got_frame = False
 
-if FROM_BAG:
-    while not keyboard.is_pressed('Esc'):
-        # frames = pipeline.poll_for_frames()
-        got_frame, frames = pipeline.try_wait_for_frames(1000)
-        if not got_frame: break
 
-        update_frame(frames)
-        
-else:
-    while not keyboard.is_pressed('Esc'):
-        frames = pipeline.wait_for_frames()
-        
-        update_frame(frames)
+while vis.poll_events():
+    got_frame, frames = pipeline.try_wait_for_frames(1000)
+    if not got_frame: break
+
+    update_frame(frames)
     
 vis.destroy_window()
 pipeline.stop()
