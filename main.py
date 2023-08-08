@@ -5,6 +5,7 @@ import pyrealsense2 as rs
 
 
 def frame_to_pcd(frame):
+    ''' Create point cloud out of RGBD camera frame '''
     aligned_frames = align.process(frame)
     # depth_frame = aligned_frames.first(rs.stream.depth)
     color_frame = aligned_frames.get_color_frame()
@@ -25,6 +26,7 @@ def frame_to_pcd(frame):
     return pcd
 
 def pose_handler(pose, time, prev_time):
+    ''' Extract translation and rotation out of tracking camera frame '''
     pose_frame = pose.get_pose_frame()
     pose_data = pose_frame.get_pose_data()
     tracker_confidence = pose_data.tracker_confidence # failed:0 - high:3
@@ -45,7 +47,8 @@ def pose_handler(pose, time, prev_time):
     # print('Appending rotation','x:',rotation[0],'y:',rotation[1],'z:',rotation[2])
     return [translation,rotation]
 
-def transform(transformation,translation,rotation):
+def transform(transformation,translation=np.zeros(3),rotation=np.zeros(3)):
+    ''' Update transformation matrix with new translation and rotation '''
     transformation *= np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0],[translation[0],translation[1],translation[2],1]])
     transformation *= np.array([[np.cos(rotation[2]),-np.sin(rotation[2]),0,0],[np.sin(rotation[2]),np.cos(rotation[2]),0,0],[0,0,1,0],[0,0,0,1]])
     transformation *= np.array([[np.cos(rotation[1]),0,np.sin(rotation[1]),0],[0,1,0,0],[-np.sin(rotation[1]),0,np.cos(rotation[1]),0],[0,0,0,1]])
@@ -53,7 +56,7 @@ def transform(transformation,translation,rotation):
     return transformation
 
 def colored_icp(source, target, transformation):
-    # Colored pointcloud registration
+    ''' Colored pointcloud registration '''
     voxel_radius = [0.01, 0.005]
     max_iters = [50, 30]
     for scale in range(len(voxel_radius)):
@@ -77,6 +80,7 @@ def colored_icp(source, target, transformation):
 # Constants
 RGBD_BAGFILE = 'mandarinka_record.bag'
 TRACK_BAGFILE = 'tracking_record.bag'
+P_CLOUD_FILE = 'object.ply'
 FROM_BAG = True
 FRAME_GAP = 10
 FRAME_WAIT = 1000
@@ -107,7 +111,7 @@ if FROM_BAG:
     playback.set_real_time(False)
 
 
-# First frames
+# Process first frames
 scene = pipeline_rgbd.wait_for_frames()
 source = frame_to_pcd(scene)
 source.points.extend(source.points)
@@ -118,7 +122,7 @@ pose_frame = pose.get_pose_frame()
 if pose_frame: pose_data = pose_frame.get_pose_data()
 
 
-# Initialize Visualizer
+# Initialize visualizer
 vis = o3d.visualization.Visualizer()
 vis.create_window(window_name='Stream', width=1280, height=720)
 vis.add_geometry(source)
@@ -138,54 +142,69 @@ prev = {'pose_time':pose_time,'frames_time_diff':sys.float_info.max,
 
 while visiualize:
 # for _ in range(20):
+    # RGBD as main frame
     got_scene, scene = pipeline_rgbd.try_wait_for_frames(FRAME_WAIT)
     if not got_scene: continue
     scene_time = scene.get_timestamp()
 
     while not found_best_frame:
+        # Track as secondary frame
         got_pose, pose = pipeline_track.try_wait_for_frames(FRAME_WAIT)
         if not got_pose: continue
         pose_time = pose.get_timestamp()
 
+        # Frames have simillar time stamps
         frames_time_diff = abs(scene_time-pose_time)
         if prev['frames_time_diff'] < frames_time_diff:
             found_best_frame = True
             prev['translation'] = translation
             prev['rotation'] = rotation
 
+        # Update camera movement
         [translation,rotation] = pose_handler(pose, pose_time, prev['pose_time'])
         prev['pose_time'] = pose_time
         prev['frames_time_diff'] = frames_time_diff
 
     prev['frames_time_diff'] = sys.float_info.max
+    # Skip few RGBD frames
     frame_counter += 1
     if frame_counter <= FRAME_GAP: continue
     frame_counter = 0
 
+    # Map new frame to previous frames in point clouds
     transformation = transform(transformation,prev['translation'],prev['rotation'])
     target = frame_to_pcd(scene)
     transformation = colored_icp(source, target, transformation)
     source.transform(transformation)
 
+    # Prep for next loop
     transformation = np.identity(4)
     prev['translation'] = np.zeros(3)
     prev['rotation'] = np.zeros(3)
 
+    # Update source point cloud
     source.points.extend(target.points)
     source.colors.extend(target.colors)
 
-    # source = source.voxel_down_sample(0.0001) # No render update !!!
+    # Remove points close to each other
+    # source = source.voxel_down_sample(0.0001)     # No render update !
     # print(len(source.points))
 
+    # Update visualizer
     vis.update_geometry(source)
     visiualize = vis.poll_events()
     vis.update_renderer()
 
 print("END")
+# Save point cloud
+ply = rs.save_to_ply(P_CLOUD_FILE)
+ply.process(source)
+
 # Hold visualizer on last frame
 while visiualize:
     visiualize = vis.poll_events()
 
+# End communication and visualization
 vis.destroy_window()
 pipeline_rgbd.stop()
 pipeline_track.stop()
