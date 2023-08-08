@@ -197,8 +197,7 @@ while visiualize:
 
 print("END")
 # Save point cloud
-ply = rs.save_to_ply(P_CLOUD_FILE)
-ply.process(source)
+o3d.io.write_point_cloud(P_CLOUD_FILE, source)
 
 # Hold visualizer on last frame
 while visiualize:
