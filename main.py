@@ -1,3 +1,4 @@
+import sys
 import open3d as o3d
 import numpy as np
 import pyrealsense2 as rs
@@ -23,12 +24,62 @@ def frame_to_pcd(frame):
     pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
     return pcd
 
+def pose_handler(pose, time, prev_time):
+    pose_frame = pose.get_pose_frame()
+    pose_data = pose_frame.get_pose_data()
+    tracker_confidence = pose_data.tracker_confidence # failed:0 - high:3
+    if tracker_confidence < 3: return
 
+    # translation = pose_data.translation
+    # rotation = pose_data.rotation # xyzw
+
+    velocity = pose_data.velocity
+    angular_velocity = pose_data.angular_velocity
+
+    # print('Translation:',translation)
+    # print('Rotation',rotation)
+    delta_time = time-prev_time
+    translation = np.array([velocity.x,velocity.y,velocity.z])/delta_time
+    rotation = np.array([angular_velocity.x,angular_velocity.y,angular_velocity.z])/delta_time
+    # print('Appending translation','x:',translation[0],'y:',translation[1],'z:',translation[2])
+    # print('Appending rotation','x:',rotation[0],'y:',rotation[1],'z:',rotation[2])
+    return [translation,rotation]
+
+def transform(transformation,translation,rotation):
+    transformation *= np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0],[translation[0],translation[1],translation[2],1]])
+    transformation *= np.array([[np.cos(rotation[2]),-np.sin(rotation[2]),0,0],[np.sin(rotation[2]),np.cos(rotation[2]),0,0],[0,0,1,0],[0,0,0,1]])
+    transformation *= np.array([[np.cos(rotation[1]),0,np.sin(rotation[1]),0],[0,1,0,0],[-np.sin(rotation[1]),0,np.cos(rotation[1]),0],[0,0,0,1]])
+    transformation *= np.array([[1,0,0,0],[0,np.cos(rotation[0]),-np.sin(rotation[0]),0],[0,np.sin(rotation[0]),np.cos(rotation[0]),0],[0,0,0,1]])
+    return transformation
+
+def colored_icp(source, target, transformation):
+    # Colored pointcloud registration
+    voxel_radius = [0.01, 0.005]
+    max_iters = [50, 30]
+    for scale in range(len(voxel_radius)):
+        iters = max_iters[scale]
+        radius = voxel_radius[scale]
+
+        source_down = source.voxel_down_sample(radius)
+        target_down = target.voxel_down_sample(radius)
+
+        source_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 2, max_nn=30))
+        target_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 2, max_nn=30))
+
+        result_icp = o3d.pipelines.registration.registration_colored_icp(
+            source_down, target_down, radius, transformation, o3d.pipelines.registration.TransformationEstimationForColoredICP(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=iters))
+        
+    if result_icp.inlier_rmse < 0.005: return np.identity(4)
+    return result_icp.transformation
+
+    
 # Constants
-RGBD_BAGFILE = 'krabicka_record.bag'
+RGBD_BAGFILE = 'mandarinka_record.bag'
 TRACK_BAGFILE = 'tracking_record.bag'
 FROM_BAG = True
 FRAME_GAP = 10
+FRAME_WAIT = 1000
 
 
 # Pipelines
@@ -44,12 +95,11 @@ if FROM_BAG:
 
 config_rgbd.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
 config_rgbd.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
-config_track.enable_stream(rs.stream.pose)
+config_track.enable_stream(rs.stream.pose, 848, 800, rs.format.six_dof, 200)
 
 pipeline_profile_rgbd = pipeline_rgbd.start(config_rgbd)
 pipeline_profile_track = pipeline_track.start(config_track)
 
-# ??? Is it necessary ???
 if FROM_BAG:
     playback = pipeline_profile_rgbd.get_device().as_playback()
     playback.set_real_time(False)
@@ -76,78 +126,65 @@ vis.update_geometry(source)
 visiualize = vis.poll_events()
 vis.update_renderer()
 
+frame_counter = 0
+pose_time = pose.get_timestamp()
+scene_time = scene.get_timestamp()
+transformation = np.identity(4)
+translation = np.zeros(3)
+rotation = np.zeros(3)
+found_best_frame = False
+prev = {'pose_time':pose_time,'frames_time_diff':sys.float_info.max,
+        'translation':np.zeros(3),'rotation':np.zeros(3)}
 
-# while visiualize:
-for _ in range(10):
-    # Ignore frames
-    for _ in range(FRAME_GAP):
-        got_scene, scene = pipeline_rgbd.try_wait_for_frames(1000)
-        got_pose, pose = pipeline_track.try_wait_for_frames(1000)
-    
-    if not got_scene or not got_pose: break
+while visiualize:
+# for _ in range(20):
+    got_scene, scene = pipeline_rgbd.try_wait_for_frames(FRAME_WAIT)
+    if not got_scene: continue
+    scene_time = scene.get_timestamp()
 
-    # pose_frame = pose.get_pose_frame()
-    # if pose_frame:
-        # pose_data_new = pose_frame.get_pose_data()
-        # translation = pose_data.translation
-        # rotation = pose_data.rotation # xyzw
+    while not found_best_frame:
+        got_pose, pose = pipeline_track.try_wait_for_frames(FRAME_WAIT)
+        if not got_pose: continue
+        pose_time = pose.get_timestamp()
 
-        # velocity = pose_data.velocity
-        # angular_velocity = pose_data.angular_velocity
+        frames_time_diff = abs(scene_time-pose_time)
+        if prev['frames_time_diff'] < frames_time_diff:
+            found_best_frame = True
+            prev['translation'] = translation
+            prev['rotation'] = rotation
 
-        # acceleration = pose_data.acceleration
-        # angular_acceleration = pose_data.angular_acceleration
+        [translation,rotation] = pose_handler(pose, pose_time, prev['pose_time'])
+        prev['pose_time'] = pose_time
+        prev['frames_time_diff'] = frames_time_diff
 
-        # tracker_confidence = pose_data.tracker_confidence # failed:0 - high:3
+    prev['frames_time_diff'] = sys.float_info.max
+    frame_counter += 1
+    if frame_counter <= FRAME_GAP: continue
+    frame_counter = 0
 
+    transformation = transform(transformation,prev['translation'],prev['rotation'])
     target = frame_to_pcd(scene)
+    transformation = colored_icp(source, target, transformation)
+    source.transform(transformation)
 
     transformation = np.identity(4)
+    prev['translation'] = np.zeros(3)
+    prev['rotation'] = np.zeros(3)
 
-    # Colored pointcloud registration
-    voxel_radius = [0.01, 0.005]
-    max_iters = [50, 30]
-    for scale in range(len(voxel_radius)):
-        iters = max_iters[scale]
-        radius = voxel_radius[scale]
+    source.points.extend(target.points)
+    source.colors.extend(target.colors)
 
-        source_down = source.voxel_down_sample(radius)
-        target_down = target.voxel_down_sample(radius)
+    # source = source.voxel_down_sample(0.0001) # No render update !!!
+    # print(len(source.points))
 
-        source_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 2, max_nn=30))
-        target_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius * 2, max_nn=30))
-
-        result_icp = o3d.pipelines.registration.registration_colored_icp(
-            source_down, target_down, radius, transformation, o3d.pipelines.registration.TransformationEstimationForColoredICP(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=iters))
-        
-        transformation = result_icp.transformation
-
-    if result_icp.inlier_rmse < 0.005:
-        source.transform(transformation)
-
-        # source.points = target.points
-        # source.colors = target.colors
-
-        source.points.extend(target.points)
-        source.colors.extend(target.colors)
-
-        source = source.remove_duplicated_points() # Maybe not necessary ???
-        source = source.voxel_down_sample(0.0001) # No render update !!!
-        print(len(source.points))
-        # print(len(source.points))
-        # source,_ = source.remove_statistical_outlier(10,5.0)
-
-        # vis.update_geometry(source)
-        # visiualize = vis.poll_events()
-        # vis.update_renderer()
+    vis.update_geometry(source)
+    visiualize = vis.poll_events()
+    vis.update_renderer()
 
 print("END")
 # Hold visualizer on last frame
 while visiualize:
-    vis.update_geometry(source)
     visiualize = vis.poll_events()
-    vis.update_renderer()
 
 vis.destroy_window()
 pipeline_rgbd.stop()
