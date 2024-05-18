@@ -1,0 +1,34 @@
+
+QMainWindow, QDialog {
+    background-color: #303030;
+}
+
+QComboBox, QLineEdit, QDoubleSpinBox, QSpinBox, QPushButton {
+    background-color: #484848;
+    color: #3b82f6;
+}
+
+QFrame {
+    color: #808080;
+}
+
+QLabel {
+    color: #3b82f6;
+}
+/*
+QPushButton {
+    background: transparent
+}
+
+QPushButton::hover {
+    border-width: 1px;
+    border-style: solid;
+    border-color: rgb(38, 66, 89);
+    background-color: rgba(38, 66, 89, 0.5);
+}
+*/
+QToolBar {
+    margin: 0px;
+    spacing: 0px;
+    padding: 2px;
+}
